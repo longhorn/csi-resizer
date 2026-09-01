@@ -4,84 +4,82 @@
 package cbor
 
 import (
-	"cmp"
 	"reflect"
-	"slices"
-	"strconv"
+	"sort"
 	"strings"
 )
 
-// field holds shared struct field metadata returned by collectFields().
 type field struct {
-	name      string
-	nameAsInt int64 // used to match field name with CBOR int
-	idx       []int
-	typ       reflect.Type // used during cache building only
-	keyAsInt  bool         // used to encode/decode field name as int
-	tagged    bool         // used to choose dominant field (at the same level tagged fields dominate untagged fields)
-	omitEmpty bool         // used to skip empty field
-	omitZero  bool         // used to skip zero field
+	name               string
+	nameAsInt          int64 // used to decoder to match field name with CBOR int
+	cborName           []byte
+	cborNameByteString []byte // major type 2 name encoding iff cborName has major type 3
+	idx                []int
+	typ                reflect.Type
+	ef                 encodeFunc
+	ief                isEmptyFunc
+	izf                isZeroFunc
+	typInfo            *typeInfo // used to decoder to reuse type info
+	tagged             bool      // used to choose dominant field (at the same level tagged fields dominate untagged fields)
+	omitEmpty          bool      // used to skip empty field
+	omitZero           bool      // used to skip zero field
+	keyAsInt           bool      // used to encode/decode field name as int
 }
 
 type fields []*field
 
-// encodingField extends field with encoding-specific data.
-type encodingField struct {
-	field
-	cborName           []byte
-	cborNameByteString []byte // major type 2 name encoding if cborName has major type 3
-	ef                 encodeFunc
-	ief                isEmptyFunc
-	izf                isZeroFunc
+// indexFieldSorter sorts fields by field idx at each level, breaking ties with idx depth.
+type indexFieldSorter struct {
+	fields fields
 }
 
-type encodingFields []*encodingField
-
-// decodingField extends field with decoding-specific data.
-type decodingField struct {
-	field
-	typInfo *typeInfo // used by decoder to reuse type info
+func (x *indexFieldSorter) Len() int {
+	return len(x.fields)
 }
 
-type decodingFields []*decodingField
+func (x *indexFieldSorter) Swap(i, j int) {
+	x.fields[i], x.fields[j] = x.fields[j], x.fields[i]
+}
 
-// indexFieldCmp compares fields by field idx at each level, breaking ties with idx depth.
-func indexFieldCmp(fi, fj *field) int {
-	iIdx, jIdx := fi.idx, fj.idx
+func (x *indexFieldSorter) Less(i, j int) bool {
+	iIdx, jIdx := x.fields[i].idx, x.fields[j].idx
 	for k := 0; k < len(iIdx) && k < len(jIdx); k++ {
 		if iIdx[k] != jIdx[k] {
-			return cmp.Compare(iIdx[k], jIdx[k])
+			return iIdx[k] < jIdx[k]
 		}
 	}
-	return cmp.Compare(len(iIdx), len(jIdx))
+	return len(iIdx) <= len(jIdx)
 }
 
-// nameLevelAndTagFieldCmp compares fields by field name, idx depth, and presence of tag.
-func nameLevelAndTagFieldCmp(fi, fj *field) int {
+// nameLevelAndTagFieldSorter sorts fields by field name, idx depth, and presence of tag.
+type nameLevelAndTagFieldSorter struct {
+	fields fields
+}
+
+func (x *nameLevelAndTagFieldSorter) Len() int {
+	return len(x.fields)
+}
+
+func (x *nameLevelAndTagFieldSorter) Swap(i, j int) {
+	x.fields[i], x.fields[j] = x.fields[j], x.fields[i]
+}
+
+func (x *nameLevelAndTagFieldSorter) Less(i, j int) bool {
+	fi, fj := x.fields[i], x.fields[j]
 	if fi.name != fj.name {
-		return cmp.Compare(fi.name, fj.name)
-	}
-	// Fields with the same name but different keyAsInt are in separate namespaces.
-	if fi.keyAsInt != fj.keyAsInt {
-		if fi.keyAsInt {
-			return -1
-		}
-		return 1
+		return fi.name < fj.name
 	}
 	if len(fi.idx) != len(fj.idx) {
-		return cmp.Compare(len(fi.idx), len(fj.idx))
+		return len(fi.idx) < len(fj.idx)
 	}
 	if fi.tagged != fj.tagged {
-		if fi.tagged {
-			return -1
-		}
-		return 1
+		return fi.tagged
 	}
-	return slices.Compare(fi.idx, fj.idx) // Break ties with field index.
+	return i < j // Field i and j have the same name, depth, and tagged status. Nothing else matters.
 }
 
-// collectFields returns visible fields of struct type t following visibility rules for JSON encoding.
-func collectFields(t reflect.Type) (flds fields, structOptions string) {
+// getFields returns visible fields of struct type t following visibility rules for JSON encoding.
+func getFields(t reflect.Type) (flds fields, structOptions string) {
 	// Get special field "_" tag options
 	if f, ok := t.FieldByName("_"); ok {
 		tag := f.Tag.Get("cbor")
@@ -119,37 +117,22 @@ func collectFields(t reflect.Type) (flds fields, structOptions string) {
 		}
 	}
 
-	// Normalize keyasint field names to their canonical integer string form.
-	// This ensures that "01", "+1", and "1" are treated as the same key
-	// during deduplication.
-	for _, f := range flds {
-		if f.keyAsInt {
-			nameAsInt, err := strconv.Atoi(f.name)
-			if err != nil {
-				continue // Leave invalid names for callers to report.
-			}
-			f.nameAsInt = int64(nameAsInt)
-			f.name = strconv.Itoa(nameAsInt)
-		}
-	}
-
-	slices.SortFunc(flds, nameLevelAndTagFieldCmp)
+	sort.Sort(&nameLevelAndTagFieldSorter{flds})
 
 	// Keep visible fields.
 	j := 0 // index of next unique field
 	for i := 0; i < len(flds); {
 		name := flds[i].name
-		keyAsInt := flds[i].keyAsInt
 		if i == len(flds)-1 || // last field
-			name != flds[i+1].name || flds[i+1].keyAsInt != keyAsInt || // field i has unique (name, keyAsInt)
+			name != flds[i+1].name || // field i has unique field name
 			len(flds[i].idx) < len(flds[i+1].idx) || // field i is at a less nested level than field i+1
 			(flds[i].tagged && !flds[i+1].tagged) { // field i is tagged while field i+1 is not
 			flds[j] = flds[i]
 			j++
 		}
 
-		// Skip fields with the same (name, keyAsInt).
-		for i++; i < len(flds) && name == flds[i].name && keyAsInt == flds[i].keyAsInt; i++ { //nolint:revive
+		// Skip fields with the same field name.
+		for i++; i < len(flds) && name == flds[i].name; i++ { //nolint:revive
 		}
 	}
 	if j != len(flds) {
@@ -157,7 +140,7 @@ func collectFields(t reflect.Type) (flds fields, structOptions string) {
 	}
 
 	// Sort fields by field index
-	slices.SortFunc(flds, indexFieldCmp)
+	sort.Sort(&indexFieldSorter{flds})
 
 	return flds, structOptions
 }
@@ -172,7 +155,7 @@ func appendFields(
 	_flds fields,
 	_nTypes map[reflect.Type][][]int,
 ) {
-	for i := range t.NumField() {
+	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 
 		ft := f.Type
@@ -184,9 +167,11 @@ func appendFields(
 			continue
 		}
 
+		cborTag := true
 		tag := f.Tag.Get("cbor")
 		if tag == "" {
 			tag = f.Tag.Get("json")
+			cborTag = false
 		}
 		if tag == "-" {
 			continue
@@ -199,11 +184,11 @@ func appendFields(
 		var omitempty, omitzero, keyasint bool
 		for j := 0; tag != ""; j++ {
 			var token string
-			before, after, ok := strings.Cut(tag, ",")
-			if !ok {
+			idx := strings.IndexByte(tag, ',')
+			if idx == -1 {
 				token, tag = tag, ""
 			} else {
-				token, tag = before, after
+				token, tag = tag[:idx], tag[idx+1:]
 			}
 			if j == 0 {
 				tagFieldName = token
@@ -212,7 +197,9 @@ func appendFields(
 				case "omitempty":
 					omitempty = true
 				case "omitzero":
-					omitzero = true
+					if cborTag || jsonStdlibSupportsOmitzero {
+						omitzero = true
+					}
 				case "keyasint":
 					keyasint = true
 				}

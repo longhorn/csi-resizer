@@ -12,11 +12,12 @@
 // limitations under the License.
 
 //go:build !freebsd && !linux
+// +build !freebsd,!linux
 
 package procfs
 
-// isRealProc returns false on architectures that don't have a Type argument
+// isRealProc returns true on architectures that don't have a Type argument
 // in their Statfs_t struct.
 func isRealProc(_ string) (bool, error) {
-	return false, nil
+	return true, nil
 }

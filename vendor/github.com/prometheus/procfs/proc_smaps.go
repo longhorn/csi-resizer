@@ -12,6 +12,7 @@
 // limitations under the License.
 
 //go:build !windows
+// +build !windows
 
 package procfs
 
@@ -23,7 +24,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/prometheus/procfs/internal/parsers"
+	"github.com/prometheus/procfs/internal/util"
 )
 
 var (
@@ -60,7 +61,7 @@ type ProcSMapsRollup struct {
 // If smaps_rollup does not exists (require kernel >= 4.15), the content of /proc/pid/smaps will
 // we read and summed.
 func (p Proc) ProcSMapsRollup() (ProcSMapsRollup, error) {
-	data, err := parsers.ReadFileNoStat(p.path("smaps_rollup"))
+	data, err := util.ReadFileNoStat(p.path("smaps_rollup"))
 	if err != nil && os.IsNotExist(err) {
 		return p.procSMapsRollupManual()
 	}
