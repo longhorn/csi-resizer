@@ -15,8 +15,6 @@
 package checker
 
 import (
-	"strings"
-
 	"github.com/google/cel-go/common/decls"
 )
 
@@ -25,9 +23,8 @@ import (
 // Each Groups value is a mapping of names to Decls in the ident and function namespaces.
 // Lookups are performed such that bindings in inner scopes shadow those in outer scopes.
 type Scopes struct {
-	parent    *Scopes
-	inherited *Scopes
-	scopes    *Group
+	parent *Scopes
+	scopes *Group
 }
 
 // newScopes creates a new, empty Scopes.
@@ -38,19 +35,24 @@ func newScopes() *Scopes {
 	}
 }
 
+// Copy creates a copy of the current Scopes values, including a copy of its parent if non-nil.
+func (s *Scopes) Copy() *Scopes {
+	cpy := newScopes()
+	if s == nil {
+		return cpy
+	}
+	if s.parent != nil {
+		cpy.parent = s.parent.Copy()
+	}
+	cpy.scopes = s.scopes.copy()
+	return cpy
+}
+
 // Push creates a new Scopes value which references the current Scope as its parent.
 func (s *Scopes) Push() *Scopes {
 	return &Scopes{
 		parent: s,
 		scopes: newGroup(),
-	}
-}
-
-// PushInherited creates a new Scopes value which references the current Scope as its inherited parent.
-func (s *Scopes) PushInherited() *Scopes {
-	return &Scopes{
-		inherited: s,
-		scopes:    newGroup(),
 	}
 }
 
@@ -70,39 +72,25 @@ func (s *Scopes) AddIdent(decl *decls.VariableDecl) {
 	s.scopes.idents[decl.Name()] = decl
 }
 
-// FindIdentInScope finds the first ident Decl with a matching name in the current Scopes value, or
-// nil if one does not exist.
-// Note: The search is only performed on the current scope and does not search outer scopes.
-func (s *Scopes) FindIdentInScope(name string) *decls.VariableDecl {
-	name = strings.TrimPrefix(name, ".")
+// FindIdent finds the first ident Decl with a matching name in Scopes, or nil if one cannot be
+// found.
+// Note: The search is performed from innermost to outermost.
+func (s *Scopes) FindIdent(name string) *decls.VariableDecl {
 	if ident, found := s.scopes.idents[name]; found {
 		return ident
+	}
+	if s.parent != nil {
+		return s.parent.FindIdent(name)
 	}
 	return nil
 }
 
-// FindLocalIdent finds a locally scoped variable with a given name, ignoring the root scope.
-func (s *Scopes) FindLocalIdent(name string) *decls.VariableDecl {
-	if s == nil || s.parent == nil {
-		return nil
-	}
-	if ident := s.FindIdentInScope(name); ident != nil {
+// FindIdentInScope finds the first ident Decl with a matching name in the current Scopes value, or
+// nil if one does not exist.
+// Note: The search is only performed on the current scope and does not search outer scopes.
+func (s *Scopes) FindIdentInScope(name string) *decls.VariableDecl {
+	if ident, found := s.scopes.idents[name]; found {
 		return ident
-	}
-	return s.parent.FindLocalIdent(name)
-}
-
-// FindGlobalIdent finds an identifier in the global scope, ignoring all local scopes.
-func (s *Scopes) FindGlobalIdent(name string) *decls.VariableDecl {
-	scope := s
-	for scope.parent != nil {
-		scope = scope.parent
-	}
-	if ident := scope.FindIdentInScope(name); ident != nil {
-		return ident
-	}
-	if scope.inherited != nil {
-		return scope.inherited.FindGlobalIdent(name)
 	}
 	return nil
 }
@@ -117,19 +105,11 @@ func (s *Scopes) SetFunction(fn *decls.FunctionDecl) {
 // The search is performed from innermost to outermost.
 // Returns nil if no such function in Scopes.
 func (s *Scopes) FindFunction(name string) *decls.FunctionDecl {
-	name = strings.TrimPrefix(name, ".")
 	if fn, found := s.scopes.functions[name]; found {
 		return fn
 	}
 	if s.parent != nil {
-		if fn := s.parent.FindFunction(name); fn != nil {
-			return fn
-		}
-	}
-	if s.inherited != nil {
-		if fn := s.inherited.FindFunction(name); fn != nil {
-			return fn
-		}
+		return s.parent.FindFunction(name)
 	}
 	return nil
 }
@@ -140,6 +120,22 @@ func (s *Scopes) FindFunction(name string) *decls.FunctionDecl {
 type Group struct {
 	idents    map[string]*decls.VariableDecl
 	functions map[string]*decls.FunctionDecl
+}
+
+// copy creates a new Group instance with a shallow copy of the variables and functions.
+// If callers need to mutate the exprpb.Decl definitions for a Function, they should copy-on-write.
+func (g *Group) copy() *Group {
+	cpy := &Group{
+		idents:    make(map[string]*decls.VariableDecl, len(g.idents)),
+		functions: make(map[string]*decls.FunctionDecl, len(g.functions)),
+	}
+	for n, id := range g.idents {
+		cpy.idents[n] = id
+	}
+	for n, fn := range g.functions {
+		cpy.functions[n] = fn
+	}
+	return cpy
 }
 
 // newGroup creates a new Group with empty maps for identifiers and functions.
