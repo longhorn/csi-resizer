@@ -15,8 +15,6 @@
 package interpreter
 
 import (
-	"fmt"
-
 	"github.com/google/cel-go/common/overloads"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
@@ -27,13 +25,9 @@ import (
 // Interpretable expression nodes at construction time.
 type InterpretableDecorator func(Interpretable) (Interpretable, error)
 
-// InterpretableDecoratorV2 is a functional interface for decorating or replacing
-// InterpretableV2 expression nodes at construction time.
-type InterpretableDecoratorV2 func(InterpretableV2) (InterpretableV2, error)
-
 // decObserveEval records evaluation state into an EvalState object.
-func decObserveEval(observer EvalObserver) InterpretableDecoratorV2 {
-	return func(i InterpretableV2) (InterpretableV2, error) {
+func decObserveEval(observer EvalObserver) InterpretableDecorator {
+	return func(i Interpretable) (Interpretable, error) {
 		switch inst := i.(type) {
 		case *evalWatch, *evalWatchAttr, *evalWatchConst, *evalWatchConstructor:
 			// these instruction are already watching, return straight-away.
@@ -55,8 +49,8 @@ func decObserveEval(observer EvalObserver) InterpretableDecoratorV2 {
 			}, nil
 		default:
 			return &evalWatch{
-				InterpretableV2: i,
-				observer:        observer,
+				Interpretable: i,
+				observer:      observer,
 			}, nil
 		}
 	}
@@ -64,8 +58,8 @@ func decObserveEval(observer EvalObserver) InterpretableDecoratorV2 {
 
 // decInterruptFolds creates an intepretable decorator which marks comprehensions as interruptable
 // where the interrupt state is communicated via a hidden variable on the Activation.
-func decInterruptFolds() InterpretableDecoratorV2 {
-	return func(i InterpretableV2) (InterpretableV2, error) {
+func decInterruptFolds() InterpretableDecorator {
+	return func(i Interpretable) (Interpretable, error) {
 		fold, ok := i.(*evalFold)
 		if !ok {
 			return i, nil
@@ -76,8 +70,8 @@ func decInterruptFolds() InterpretableDecoratorV2 {
 }
 
 // decDisableShortcircuits ensures that all branches of an expression will be evaluated, no short-circuiting.
-func decDisableShortcircuits() InterpretableDecoratorV2 {
-	return func(i InterpretableV2) (InterpretableV2, error) {
+func decDisableShortcircuits() InterpretableDecorator {
+	return func(i Interpretable) (Interpretable, error) {
 		switch expr := i.(type) {
 		case *evalOr:
 			return &evalExhaustiveOr{
@@ -110,8 +104,8 @@ func decDisableShortcircuits() InterpretableDecoratorV2 {
 // conditionally precomputing the result.
 // - build list and map values with constant elements.
 // - convert 'in' operations to set membership tests if possible.
-func decOptimize() InterpretableDecoratorV2 {
-	return func(i InterpretableV2) (InterpretableV2, error) {
+func decOptimize() InterpretableDecorator {
+	return func(i Interpretable) (Interpretable, error) {
 		switch inst := i.(type) {
 		case *evalList:
 			return maybeBuildListLiteral(i, inst)
@@ -130,7 +124,7 @@ func decOptimize() InterpretableDecoratorV2 {
 }
 
 // decRegexOptimizer compiles regex pattern string constants.
-func decRegexOptimizer(regexOptimizations ...*RegexOptimization) InterpretableDecoratorV2 {
+func decRegexOptimizer(regexOptimizations ...*RegexOptimization) InterpretableDecorator {
 	functionMatchMap := make(map[string]*RegexOptimization)
 	overloadMatchMap := make(map[string]*RegexOptimization)
 	for _, m := range regexOptimizations {
@@ -140,7 +134,7 @@ func decRegexOptimizer(regexOptimizations ...*RegexOptimization) InterpretableDe
 		}
 	}
 
-	return func(i InterpretableV2) (InterpretableV2, error) {
+	return func(i Interpretable) (Interpretable, error) {
 		call, ok := i.(InterpretableCall)
 		if !ok {
 			return i, nil
@@ -171,78 +165,7 @@ func decRegexOptimizer(regexOptimizations ...*RegexOptimization) InterpretableDe
 	}
 }
 
-func decRegexProgramSizeLimit(limit int) InterpretableDecoratorV2 {
-	return func(i InterpretableV2) (InterpretableV2, error) {
-		if limit <= 0 {
-			return i, nil
-		}
-		call, ok := i.(InterpretableCall)
-		if !ok {
-			return i, nil
-		}
-		if !isRegexFunction(call.Function(), call.OverloadID()) || len(call.Args()) < 2 {
-			return i, nil
-		}
-		regexArg := call.Args()[1]
-		if constVal, isConst := regexArg.(InterpretableConst); isConst {
-			if pattern, ok := constVal.Value().(types.String); ok {
-				sz, err := types.RegexProgramSize(string(pattern))
-				if err != nil {
-					return i, nil
-				}
-				if sz > limit {
-					return nil, fmt.Errorf("regex program size %d exceeds limit of %d", sz, limit)
-				}
-			}
-			return i, nil
-		}
-		return &regexLimitCall{InterpretableCall: call, limit: limit}, nil
-	}
-}
-
-func isRegexFunction(fn, overload string) bool {
-	switch fn {
-	case overloads.Matches, "regex.extract", "regex.extractAll", "regex.replace":
-		return true
-	}
-	switch overload {
-	case overloads.Matches, overloads.MatchesString,
-		"regex_extract_string_string", "regex_extractAll_string_string",
-		"regex_replace_string_string_string", "regex_replace_string_string_string_int":
-		return true
-	}
-	return false
-}
-
-type regexLimitCall struct {
-	InterpretableCall
-	limit int
-}
-
-func (r *regexLimitCall) Exec(frame *ExecutionFrame) ref.Val {
-	args := r.Args()
-	if len(args) >= 2 {
-		patternVal := args[1].Exec(frame)
-		if types.IsError(patternVal) {
-			return patternVal
-		}
-		if types.IsUnknown(patternVal) {
-			return patternVal
-		}
-		if pat, ok := patternVal.(types.String); ok {
-			sz, err := types.RegexProgramSize(string(pat))
-			if err != nil {
-				return types.WrapErr(err)
-			}
-			if sz > r.limit {
-				return types.WrapErr(fmt.Errorf("regex program size %d exceeds limit of %d", sz, r.limit))
-			}
-		}
-	}
-	return r.InterpretableCall.Exec(frame)
-}
-
-func maybeOptimizeConstUnary(i InterpretableV2, call InterpretableCall) (InterpretableV2, error) {
+func maybeOptimizeConstUnary(i Interpretable, call InterpretableCall) (Interpretable, error) {
 	args := call.Args()
 	if len(args) != 1 {
 		return i, nil
@@ -258,7 +181,7 @@ func maybeOptimizeConstUnary(i InterpretableV2, call InterpretableCall) (Interpr
 	return NewConstValue(call.ID(), val), nil
 }
 
-func maybeBuildListLiteral(i InterpretableV2, l *evalList) (InterpretableV2, error) {
+func maybeBuildListLiteral(i Interpretable, l *evalList) (Interpretable, error) {
 	for _, elem := range l.elems {
 		_, isConst := elem.(InterpretableConst)
 		if !isConst {
@@ -268,7 +191,7 @@ func maybeBuildListLiteral(i InterpretableV2, l *evalList) (InterpretableV2, err
 	return NewConstValue(l.ID(), l.Eval(EmptyActivation())), nil
 }
 
-func maybeBuildMapLiteral(i InterpretableV2, mp *evalMap) (InterpretableV2, error) {
+func maybeBuildMapLiteral(i Interpretable, mp *evalMap) (Interpretable, error) {
 	for idx, key := range mp.keys {
 		_, isConst := key.(InterpretableConst)
 		if !isConst {
@@ -286,7 +209,7 @@ func maybeBuildMapLiteral(i InterpretableV2, mp *evalMap) (InterpretableV2, erro
 // test if the following conditions are true:
 // - the list is a constant with homogeneous element types.
 // - the elements are all of primitive type.
-func maybeOptimizeSetMembership(i InterpretableV2, inlist InterpretableCall) (InterpretableV2, error) {
+func maybeOptimizeSetMembership(i Interpretable, inlist InterpretableCall) (Interpretable, error) {
 	args := inlist.Args()
 	lhs := args[0]
 	rhs := args[1]
