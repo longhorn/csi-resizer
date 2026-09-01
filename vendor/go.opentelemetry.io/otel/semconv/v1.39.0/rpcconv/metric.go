@@ -26,9 +26,11 @@ var (
 // with.
 type ErrorTypeAttr string
 
-// ErrorTypeOther is a fallback error value to be used when the instrumentation
-// doesn't define a custom value.
-var ErrorTypeOther ErrorTypeAttr = "_OTHER"
+var (
+	// ErrorTypeOther is a fallback error value to be used when the instrumentation
+	// doesn't define a custom value.
+	ErrorTypeOther ErrorTypeAttr = "_OTHER"
+)
 
 // NetworkTransportAttr is an attribute conforming to the network.transport
 // semantic conventions. It represents the [OSI transport layer] or
@@ -147,9 +149,7 @@ func (m ClientCallDuration) Record(
 	attrs ...attribute.KeyValue,
 ) {
 	if len(attrs) == 0 {
-		m.Float64Histogram.Record(ctx, val, metric.WithAttributes(
-			attribute.String("rpc.system.name", string(systemName)),
-		))
+		m.Float64Histogram.Record(ctx, val)
 		return
 	}
 
@@ -325,9 +325,7 @@ func (m ClientRequestSize) Record(
 	attrs ...attribute.KeyValue,
 ) {
 	if len(attrs) == 0 {
-		m.Int64Histogram.Record(ctx, val, metric.WithAttributes(
-			attribute.String("rpc.system.name", string(systemName)),
-		))
+		m.Int64Histogram.Record(ctx, val)
 		return
 	}
 
@@ -502,9 +500,7 @@ func (m ClientResponseSize) Record(
 	attrs ...attribute.KeyValue,
 ) {
 	if len(attrs) == 0 {
-		m.Int64Histogram.Record(ctx, val, metric.WithAttributes(
-			attribute.String("rpc.system.name", string(systemName)),
-		))
+		m.Int64Histogram.Record(ctx, val)
 		return
 	}
 
@@ -680,9 +676,7 @@ func (m ServerCallDuration) Record(
 	attrs ...attribute.KeyValue,
 ) {
 	if len(attrs) == 0 {
-		m.Float64Histogram.Record(ctx, val, metric.WithAttributes(
-			attribute.String("rpc.system.name", string(systemName)),
-		))
+		m.Float64Histogram.Record(ctx, val)
 		return
 	}
 
@@ -858,9 +852,7 @@ func (m ServerRequestSize) Record(
 	attrs ...attribute.KeyValue,
 ) {
 	if len(attrs) == 0 {
-		m.Int64Histogram.Record(ctx, val, metric.WithAttributes(
-			attribute.String("rpc.system.name", string(systemName)),
-		))
+		m.Int64Histogram.Record(ctx, val)
 		return
 	}
 
@@ -1035,9 +1027,7 @@ func (m ServerResponseSize) Record(
 	attrs ...attribute.KeyValue,
 ) {
 	if len(attrs) == 0 {
-		m.Int64Histogram.Record(ctx, val, metric.WithAttributes(
-			attribute.String("rpc.system.name", string(systemName)),
-		))
+		m.Int64Histogram.Record(ctx, val)
 		return
 	}
 
